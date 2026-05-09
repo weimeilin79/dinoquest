@@ -239,7 +239,7 @@ async def log_game_end(log_data: GameEndLog):
 
 
 @app.get("/api/leaderboard/status")
-async def get_leaderboard_status(authorization: str = Header(None)):
+async def get_leaderboard_status(authorization: str = Header(None)) :
     is_admin = False
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split("Bearer ")[1]
@@ -275,23 +275,17 @@ async def get_leaderboard(authorization: str = Header(None)):
     if not LEADERBOARD_ENABLED and not is_admin:
         raise HTTPException(status_code=403, detail="Leaderboard is currently disabled")
 
-    # Load ALL documents into memory at once
-    docs = db.collection("scores").get()
+    # Fetch top 100 documents sorted by score directly from Firestore
+    docs = db.collection("scores").order_by("score", direction="DESCENDING").limit(100).get()
 
     scores = []
     for doc in docs:
         data = doc.to_dict()
         data["id"] = doc.id
-        # Vibe-coding mistake: The developer attempts to inject an empty 'replay_frames' buffer for the frontend.
-        # Ensure allocating a unique string per document so it literally consumes RAM!
-        data["replay_frames"] = "x" * 20000000 + str(doc.id)
+        # Removed the memory-intensive replay_frames buffer
         scores.append(data)
 
-    # Sort in-memory (adding further memory/CPU pressure)
-    scores.sort(key=lambda x: x.get("score", 0), reverse=True)
-
-    # Only return top 100, masking the fact we loaded 50,000 into memory
-    return {"status": "success", "leaderboard": scores[:100]}
+    return {"status": "success", "leaderboard": scores}
 
 
 # ====================================================================
