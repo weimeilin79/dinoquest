@@ -239,7 +239,7 @@ async def log_game_end(log_data: GameEndLog):
 
 
 @app.get("/api/leaderboard/status")
-async def get_leaderboard_status(authorization: str = Header(None)):
+async def get_leaderboard_status(authorization: str = Header(None)) :
     is_admin = False
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split("Bearer ")[1]
@@ -256,11 +256,8 @@ async def get_leaderboard_status(authorization: str = Header(None)):
 @app.get("/api/leaderboard")
 async def get_leaderboard(authorization: str = Header(None)):
     """
-    Vibe-coded mistake: Fetching all documents at once without pagination or limits.
-
-    Works perfectly with 5000 records.
-    Causes an immediate Out-Of-Memory (OOM) crash in Cloud Run when the
-    collection has 50,000+ records and container memory is low (e.g. 512MB).
+    Fixed: Use Firestore server-side ordering and limits to prevent OOM.
+    Removed the massive 'replay_frames' string allocation.
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -275,23 +272,17 @@ async def get_leaderboard(authorization: str = Header(None)):
     if not LEADERBOARD_ENABLED and not is_admin:
         raise HTTPException(status_code=403, detail="Leaderboard is currently disabled")
 
-    # Load ALL documents into memory at once
-    docs = db.collection("scores").get()
+    # Limit query to top 100 on the server side
+    docs = db.collection("scores").order_by("score", direction="DESCENDING").limit(100).get()
 
     scores = []
     for doc in docs:
         data = doc.to_dict()
         data["id"] = doc.id
-        # Vibe-coding mistake: The developer attempts to inject an empty 'replay_frames' buffer for the frontend.
-        # Ensure allocating a unique string per document so it literally consumes RAM!
-        data["replay_frames"] = "x" * 20000000 + str(doc.id)
+        # Removed memory-intensive replay_frames buffer
         scores.append(data)
 
-    # Sort in-memory (adding further memory/CPU pressure)
-    scores.sort(key=lambda x: x.get("score", 0), reverse=True)
-
-    # Only return top 100, masking the fact we loaded 50,000 into memory
-    return {"status": "success", "leaderboard": scores[:100]}
+    return {"status": "success", "leaderboard": scores}
 
 
 # ====================================================================
