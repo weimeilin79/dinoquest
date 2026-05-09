@@ -276,21 +276,21 @@ async def get_leaderboard(authorization: str = Header(None)):
         raise HTTPException(status_code=403, detail="Leaderboard is currently disabled")
 
     # Load ALL documents into memory at once
-    docs = db.collection("scores").get()
+    from google.cloud.firestore import Query  # Import Query for DESCENDING
+
+    docs = db.collection("scores").order_by("score", direction=Query.DESCENDING).limit(100).get()
 
     scores = []
     for doc in docs:
         data = doc.to_dict()
         data["id"] = doc.id
-        # Vibe-coding mistake: The developer attempts to inject an empty 'replay_frames' buffer for the frontend.
-        # Ensure allocating a unique string per document so it literally consumes RAM!
-        data["replay_frames"] = "x" * 20000000 + str(doc.id)
+        # Removed the problematic 'replay_frames' generation
         scores.append(data)
 
-    # Sort in-memory (adding further memory/CPU pressure)
-    scores.sort(key=lambda x: x.get("score", 0), reverse=True)
+    # Sort in-memory (adding further memory/CPU pressure) - This sorting is now redundant as Firestore sorts
+    # scores.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-    # Only return top 100, masking the fact we loaded 50,000 into memory
+    # Only return top 100, masking the fact we loaded 50,000 into memory - This is also now handled by the query limit
     return {"status": "success", "leaderboard": scores[:100]}
 
 
