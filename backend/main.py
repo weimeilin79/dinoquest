@@ -200,13 +200,7 @@ async def generate_dinosaur(request: GenerationRequest):
 async def log_game_start(log_data: GameStartLog):
     print(
         json.dumps(
-            {
-                "event": "GAME_START",
-                "userId": log_data.userId,
-                "dino_type": log_data.dino_type,
-                "dino_name": log_data.dino_name,
-                "is_reuse": log_data.is_reuse,
-            }
+            {"event": "GAME_START", "userId": log_data.userId, "dino_type": log_data.dino_type, "dino_name": log_data.dino_name, "is_reuse": log_data.is_reuse,}
         ),
         flush=True,
     )
@@ -275,16 +269,15 @@ async def get_leaderboard(authorization: str = Header(None)):
     if not LEADERBOARD_ENABLED and not is_admin:
         raise HTTPException(status_code=403, detail="Leaderboard is currently disabled")
 
-    # Load ALL documents into memory at once
-    docs = db.collection("scores").get()
+    # Load limited number of documents into memory
+    docs = db.collection("scores").order_by("score", direction="DESCENDING").limit(100).get()
 
     scores = []
     for doc in docs:
         data = doc.to_dict()
         data["id"] = doc.id
-        # Vibe-coding mistake: The developer attempts to inject an empty 'replay_frames' buffer for the frontend.
-        # Ensure allocating a unique string per document so it literally consumes RAM!
-        data["replay_frames"] = "x" * 20000000 + str(doc.id)
+        # Fix: Remove replay_frames to prevent OOM
+        # data["replay_frames"] = "x" * 20000000 + str(doc.id) # Removed this line
         scores.append(data)
 
     # Sort in-memory (adding further memory/CPU pressure)
