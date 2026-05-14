@@ -276,7 +276,7 @@ async def get_leaderboard(authorization: str = Header(None)):
         raise HTTPException(status_code=403, detail="Leaderboard is currently disabled")
 
     # Load ALL documents into memory at once
-    docs = db.collection("scores").get()
+    docs = db.collection("scores").order_by("score", direction="DESCENDING").limit(100).get()
 
     scores = []
     for doc in docs:
@@ -284,7 +284,7 @@ async def get_leaderboard(authorization: str = Header(None)):
         data["id"] = doc.id
         # Vibe-coding mistake: The developer attempts to inject an empty 'replay_frames' buffer for the frontend.
         # Ensure allocating a unique string per document so it literally consumes RAM!
-        data["replay_frames"] = "x" * 20000000 + str(doc.id)
+        # REMOVED: data["replay_frames"] = "x" * 20000000 + str(doc.id)
         scores.append(data)
 
     # Sort in-memory (adding further memory/CPU pressure)
