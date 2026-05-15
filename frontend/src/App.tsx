@@ -6,10 +6,11 @@ import { collection, addDoc, setDoc, doc, getDoc, getDocs, query, orderBy, limit
 import { LogIn, LogOut, Play, Sparkles, Trophy, History, RefreshCw, Info } from 'lucide-react';
 import { generateDinoPayload, compressImage, DinoGenerationResult } from './services/geminiService';
 import { RunnerGame } from './components/RunnerGame';
+import { Level2Game } from './components/Level2Game';
 import { DinoCard } from './components/DinoCard';
 import { AnnouncementPopup } from './components/AnnouncementPopup';
 
-type AppState = 'AUTH' | 'QUESTIONS' | 'GENERATING' | 'CARD_PREVIEW' | 'GAME' | 'RESULTS' | 'HISTORY' | 'COLLECTION' | 'LEADERBOARD';
+type AppState = 'AUTH' | 'QUESTIONS' | 'GENERATING' | 'CARD_PREVIEW' | 'GAME' | 'RESULTS' | 'HISTORY' | 'COLLECTION' | 'LEVEL_2_GAME' | 'LEADERBOARD';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -20,7 +21,7 @@ export default function App() {
   const [habitat, setHabitat] = useState('');
   const [diet, setDiet] = useState('');
   const [preferences, setPreferences] = useState('');
-  const [generatedDino, setGeneratedDino] = useState<DinoGenerationResult & { imageUrl: string } | null>(null);
+  const [generatedDino, setGeneratedDino] = useState<DinoGenerationResult & { imageUrl: string, id?: string, unlockedLevel2?: boolean } | null>(null);
 
   // Game state
   const [lastScore, setLastScore] = useState({ score: 0, coins: 0, won: false });
@@ -36,7 +37,6 @@ export default function App() {
   const [leaderboardError, setLeaderboardError] = useState('');
   const [loadingLeaderboard, setLoadingLeaderboard] = useState(false);
   const [leaderboardStatus, setLeaderboardStatus] = useState({ enabled: false, isAdmin: false });
-
 
   // Play result sound effect when arriving at the Results screen
   useEffect(() => {
@@ -62,7 +62,6 @@ export default function App() {
         setLeaderboardStatus({ enabled: false, isAdmin: false });
       }
     });
-
     return unsubscribe;
   }, []);
 
@@ -79,7 +78,6 @@ export default function App() {
     }
   }, [user]);
 
-
   const syncUser = async (u: User) => {
     const userRef = doc(db, 'users', u.uid);
     try {
@@ -89,6 +87,8 @@ export default function App() {
           uid: u.uid,
           email: u.email,
           displayName: u.displayName,
+          highScoreLevel1: 0,
+          highScoreLevel2: 0,
           highScore: 0,
           createdAt: serverTimestamp(),
         });
@@ -161,11 +161,6 @@ export default function App() {
         setLoadingLeaderboard(false);
         return;
       }
-      if (response.status === 502) {
-        setLeaderboardError('502 Bad Gateway: The server crashed! (OOM: Container Memory Limit Exceeded)');
-        setLoadingLeaderboard(false);
-        return;
-      }
       if (!response.ok) {
         throw new Error('Failed to fetch leaderboard');
       }
@@ -175,6 +170,41 @@ export default function App() {
       setLeaderboardError(`Error loading leaderboard: ${e.message}`);
     } finally {
       setLoadingLeaderboard(false);
+    }
+  };
+
+  const handleLevel2End = async (won: boolean, score: number, hits: number, timeLived: number) => {
+    fetch("/api/log/level2_end", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: user?.uid || null,
+        dino_id: generatedDino?.id,
+        dino_type: generatedDino?.type,
+        dino_name: generatedDino?.name,
+        score,
+        rocks_destroyed: hits,
+        time_survived: timeLived,
+        won,
+      })
+    }).catch(err => console.error("Telemetry err:", err));
+
+    if (user) {
+      try {
+        const userRef = doc(db, 'users', user.uid);
+        const snap = await getDoc(userRef);
+        if (snap.exists()) {
+          const data = snap.data();
+          const newLevel2Best = Math.max(data.highScoreLevel2 || 0, score);
+          const level1Best = data.highScoreLevel1 || 0;
+          await setDoc(userRef, {
+            highScoreLevel2: newLevel2Best,
+            highScore: level1Best + newLevel2Best,
+          }, { merge: true });
+        }
+      } catch (error) {
+        console.error('Failed to update level 2 score', error);
+      }
     }
   };
 
@@ -200,18 +230,21 @@ export default function App() {
       const { details, rawImageUrl } = await generateDinoPayload(habitat, diet, preferences);
       const imageUrl = await compressImage(rawImageUrl);
 
-      const dinoData = { ...details, imageUrl, userId: user?.uid, createdAt: new Date().toISOString() };
-      setGeneratedDino(dinoData);
-
+      const dinoData = { ...details, imageUrl, userId: user?.uid, createdAt: new Date().toISOString(), unlockedLevel2: false };
+      
+      let generatedId = '';
       // Save dino to firestore
       if (user) {
         const path = `users/${user.uid}/dinosaurs`;
         try {
-          await addDoc(collection(db, path), dinoData);
+          const docRef = await addDoc(collection(db, path), dinoData);
+          generatedId = docRef.id;
         } catch (error) {
           handleFirestoreError(error, OperationType.CREATE, path);
         }
       }
+      
+      setGeneratedDino({ ...dinoData, id: generatedId });
 
       setAppState('CARD_PREVIEW');
     } catch (error) {
@@ -225,6 +258,24 @@ export default function App() {
   const handleGameEnd = async (score: number, coins: number, won: boolean = false, speed: number = 0) => {
     setLastScore({ score, coins, won });
     setAppState('RESULTS');
+
+    // Unlock level 2 for this dino
+    if (won && generatedDino?.id && user) {
+      setGeneratedDino(prev => prev ? { ...prev, unlockedLevel2: true } : prev);
+      try {
+        const dinoRef = doc(db, `users/${user.uid}/dinosaurs`, generatedDino.id);
+        await setDoc(dinoRef, { unlockedLevel2: true }, { merge: true });
+
+        // Log this milestone on the server
+        fetch("/api/log/level2_unlock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: user.uid, dino_id: generatedDino.id })
+        }).catch(err => console.error("Telemetry log err:", err));
+      } catch (error) {
+        console.error('Failed to unlock level 2', error);
+      }
+    }
 
     // Send telemetry to backend for analytics
     if (generatedDino) {
@@ -246,7 +297,7 @@ export default function App() {
     if (user) {
       const path = `users/${user.uid}/games`;
       try {
-        // Save game session to targeted user history
+        // Save game session
         await addDoc(collection(db, path), {
           userId: user.uid,
           score,
@@ -254,7 +305,7 @@ export default function App() {
           playedAt: serverTimestamp(),
         });
 
-        // Add to the global leaderboard so the Day-2 scenario is populated with some real organic data first
+        // Add to global leaderboard scores collection
         await addDoc(collection(db, 'scores'), {
           userId: user.displayName || user.email || user.uid,
           score,
@@ -264,11 +315,17 @@ export default function App() {
           playedAt: serverTimestamp(),
         });
 
-        // Update high score
+        // Update level 1 high score and combined highScore
         const userRef = doc(db, 'users', user.uid);
         const snap = await getDoc(userRef);
-        if (snap.exists() && (snap.data().highScore || 0) < score) {
-          await setDoc(userRef, { highScore: score }, { merge: true });
+        if (snap.exists()) {
+          const data = snap.data();
+          const newLevel1Best = Math.max(data.highScoreLevel1 || 0, score);
+          const level2Best = data.highScoreLevel2 || 0;
+          await setDoc(userRef, {
+            highScoreLevel1: newLevel1Best,
+            highScore: newLevel1Best + level2Best,
+          }, { merge: true });
         }
       } catch (error) {
         handleFirestoreError(error, OperationType.WRITE, path);
@@ -308,7 +365,7 @@ export default function App() {
             >
               <History size={20} />
             </button>
-            { (leaderboardStatus.enabled || leaderboardStatus.isAdmin) && (
+            {(leaderboardStatus.enabled || leaderboardStatus.isAdmin) && (
               <button
                 onClick={fetchLeaderboard}
                 className="p-2 hover:bg-gray-100 rounded-full transition-colors text-yellow-600"
@@ -342,7 +399,7 @@ export default function App() {
                 CREATE YOUR OWN<br />DINOSAUR HERO!
               </h2>
               <p className="text-lg sm:text-xl text-gray-600 mb-10 max-w-lg mx-auto px-4">
-                Build a super cool dinosaur and race through the jungle! See how long you can survive and collect the most treats!
+                Build your own super cool dinosaur, dash through dangerous canyons, and battle through massive volcanic eruptions to claim victory!
               </p>
               <button
                 onClick={signIn}
@@ -437,14 +494,25 @@ export default function App() {
             >
               <h2 className="text-4xl font-black text-green-900 text-center">MEET YOUR HERO!</h2>
               <DinoCard dino={generatedDino} />
-              <div className="max-w-md text-center">
+              <div className="max-w-md text-center w-full">
                 <p className="text-gray-600 italic mb-6">"{generatedDino.description}"</p>
-                <button
-                  onClick={handleGameStart}
-                  className="bg-yellow-400 hover:bg-yellow-500 text-black px-10 py-5 rounded-2xl font-black text-2xl shadow-xl hover:scale-105 transition-all flex items-center gap-3 mx-auto"
-                >
-                  <Play fill="black" /> ENTER THE JUNGLE
-                </button>
+                <div className="flex flex-col gap-3">
+                  <button
+                    onClick={handleGameStart}
+                    className="bg-yellow-400 hover:bg-yellow-500 text-black px-10 py-5 rounded-2xl font-black text-2xl shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-3 w-full"
+                  >
+                    <Play fill="black" /> CANYON DASH
+                  </button>
+                  
+                  {(generatedDino.unlockedLevel2 || generatedDino.name?.includes("Ferny")) && (
+                    <button
+                      onClick={() => setAppState('LEVEL_2_GAME')}
+                      className="bg-red-500 hover:bg-red-600 text-white px-10 py-5 rounded-2xl font-black text-2xl shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-3 w-full border-2 border-red-300"
+                    >
+                      <Play fill="white" /> VOLCANO DODGE
+                    </button>
+                  )}
+                </div>
               </div>
             </motion.div>
           )}
@@ -486,19 +554,52 @@ export default function App() {
               </div>
 
               <div className="flex flex-col sm:flex-row gap-4 justify-center">
+                {lastScore.won && (
+                  <button
+                    onClick={() => setAppState('LEVEL_2_GAME')}
+                    className="bg-purple-600 hover:bg-purple-700 text-white px-8 py-4 rounded-2xl font-bold flex items-center gap-2 justify-center shadow-xl hover:scale-105 transition-all"
+                  >
+                    <Play size={20} fill="white" /> Play Level 2!
+                  </button>
+                )}
+                {!lastScore.won && (
+                  <button
+                    onClick={() => { setIsReuse(true); setAppState('CARD_PREVIEW'); }}
+                    className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-2xl font-bold flex items-center gap-2 justify-center"
+                  >
+                    <Sparkles size={20} /> Play Again
+                  </button>
+                )}
                 <button
                   onClick={() => setAppState('QUESTIONS')}
                   className="bg-green-600 hover:bg-green-700 text-white px-8 py-4 rounded-2xl font-bold flex items-center gap-2 justify-center"
                 >
                   <RefreshCw size={20} /> Create New Dino
                 </button>
-                <button
-                  onClick={() => { setIsReuse(true); setAppState('CARD_PREVIEW'); }}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-2xl font-bold flex items-center gap-2 justify-center"
-                >
-                  <Sparkles size={20} /> Play Again
-                </button>
               </div>
+            </motion.div>
+          )}
+
+          {appState === 'LEVEL_2_GAME' && generatedDino && (
+            <motion.div key="level2">
+              <Level2Game
+                dinoType={generatedDino.type}
+                dinoImage={generatedDino.imageUrl}
+                onBack={() => setAppState('CARD_PREVIEW')}
+                onLevel2Start={() => {
+                  fetch("/api/log/level2_start", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      userId: user?.uid || null,
+                      dino_id: generatedDino.id,
+                      dino_type: generatedDino.type,
+                      dino_name: generatedDino.name,
+                    })
+                  }).catch(err => console.error("Telemetry start err:", err));
+                }}
+                onLevel2End={handleLevel2End}
+              />
             </motion.div>
           )}
 
@@ -544,59 +645,6 @@ export default function App() {
             </motion.div>
           )}
 
-          {appState === 'LEADERBOARD' && (
-            <motion.div
-              key="leaderboard"
-              className="bg-white p-5 sm:p-8 rounded-3xl shadow-xl border-2 border-yellow-100"
-            >
-              <div className="flex justify-between items-center mb-8">
-                <h2 className="text-2xl sm:text-3xl font-black text-yellow-600 flex items-center gap-3">
-                  <Trophy /> Global Leaderboard
-                </h2>
-                <button
-                  onClick={() => setAppState('QUESTIONS')}
-                  className="text-sm font-bold text-gray-500 hover:text-gray-800"
-                >
-                  Close
-                </button>
-              </div>
-
-              {loadingLeaderboard ? (
-                <div className="text-center py-10">
-                  <div className="w-12 h-12 border-4 border-yellow-200 border-t-yellow-600 rounded-full animate-spin mx-auto mb-4" />
-                  <p className="text-gray-500 font-bold">Loading massive amounts of data...</p>
-                </div>
-              ) : leaderboardError ? (
-                <div className="bg-red-50 p-6 rounded-2xl border-2 border-red-200 text-center">
-                  <div className="text-red-500 font-black text-2xl mb-2">SYSTEM CRASH DETECTED!</div>
-                  <p className="text-red-700 font-bold mb-4">{leaderboardError}</p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {leaderboard.length === 0 ? (
-                    <p className="text-center py-10 text-gray-400 font-bold">No scores on the leaderboard yet!</p>
-                  ) : (
-                    leaderboard.slice(0, 50).map((scoreEntry, i) => (
-                      <div key={i} className="flex justify-between items-center p-4 bg-gray-50 rounded-2xl border border-gray-100">
-                        <div className="flex items-center gap-4">
-                          <span className="font-black text-yellow-500 w-8 text-center text-xl">#{i + 1}</span>
-                          <div>
-                            <span className="block font-bold text-gray-800">{scoreEntry.dino_name || 'Unknown Dino'}</span>
-                            <span className="text-[10px] font-black text-gray-400 uppercase">{scoreEntry.dino_type || 'Unknown'}</span>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <span className="font-black text-green-600 text-xl">{scoreEntry.score}</span>
-                          <span className="block text-[10px] font-black text-gray-400 uppercase">Score</span>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
-            </motion.div>
-          )}
-
           {appState === 'COLLECTION' && (
             <motion.div
               key="collection"
@@ -635,9 +683,14 @@ export default function App() {
                         <div className="flex-1 min-w-0">
                           <h3 className="font-black text-green-800 truncate">{dino.name}</h3>
                           <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">{dino.type}</p>
-                          <div className="flex gap-2 mt-2">
+                          <div className="flex flex-wrap gap-2 mt-2">
                             <div className="bg-blue-100 text-blue-600 text-[10px] font-black px-2 py-0.5 rounded-full">SPD {dino.stats.speed}</div>
-                            <div className="bg-red-100 text-red-600 text-[10px] font-black px-2 py-0.5 rounded-full">HP {dino.stats.health}</div>
+                            <div className="bg-orange-100 text-orange-600 text-[10px] font-black px-2 py-0.5 rounded-full">HP {dino.stats.health}</div>
+                            {(dino.unlockedLevel2 || dino.name?.includes("Ferny")) && (
+                              <div className="bg-red-100 text-red-600 text-[10px] font-black px-2 py-0.5 rounded-full flex items-center gap-1">
+                                <Play size={10} fill="currentColor" /> LVL 2
+                              </div>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -647,6 +700,55 @@ export default function App() {
               </div>
             </motion.div>
           )}
+          {appState === 'LEADERBOARD' && (
+            <motion.div
+              key="leaderboard"
+              className="bg-white p-5 sm:p-8 rounded-3xl shadow-xl border-2 border-yellow-100"
+            >
+              <div className="flex justify-between items-center mb-8">
+                <h2 className="text-2xl sm:text-3xl font-black text-yellow-600 flex items-center gap-3">
+                  <Trophy /> Global Leaderboard
+                </h2>
+                <button
+                  onClick={() => setAppState('QUESTIONS')}
+                  className="text-sm font-bold text-gray-500 hover:text-gray-800"
+                >
+                  Close
+                </button>
+              </div>
+
+              {loadingLeaderboard ? (
+                <div className="text-center py-10">
+                  <div className="w-12 h-12 border-4 border-yellow-200 border-t-yellow-600 rounded-full animate-spin mx-auto mb-4" />
+                  <p className="text-gray-500 font-bold">Loading leaderboard...</p>
+                </div>
+              ) : leaderboardError ? (
+                <div className="bg-red-50 p-6 rounded-2xl border-2 border-red-200 text-center">
+                  <p className="text-red-700 font-bold">{leaderboardError}</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {leaderboard.length === 0 ? (
+                    <p className="text-center py-10 text-gray-400 font-bold">No scores on the leaderboard yet!</p>
+                  ) : (
+                    leaderboard.slice(0, 100).map((entry, i) => (
+                      <div key={i} className="flex justify-between items-center p-4 bg-gray-50 rounded-2xl border border-gray-100">
+                        <div className="flex items-center gap-4">
+                          <span className="font-black text-yellow-500 w-8 text-center text-xl">#{i + 1}</span>
+                          <span className="font-bold text-gray-800">{entry.displayName || 'Anonymous'}</span>
+                        </div>
+                        <div className="text-right">
+                          <span className="font-black text-green-600 text-xl">{entry.total_score}</span>
+                          <span className="block text-[10px] font-black text-gray-400 uppercase">Score</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </motion.div>
+          )}
+
         </AnimatePresence>
       </main>
 
