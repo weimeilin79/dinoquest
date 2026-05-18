@@ -191,12 +191,8 @@ async def generate_dinosaur(request: GenerationRequest):
         )
 
 
-# ====================================================================
-# TELEMETRY LOGGING ENDPOINTS
-# ====================================================================
-
-
-@app.post("/api/log/game_start")
+# ====================================================================\n# TELEMETRY LOGGING ENDPOINTS
+# ====================================================================\n\n\n@app.post("/api/log/game_start")
 async def log_game_start(log_data: GameStartLog):
     print(
         json.dumps(
@@ -233,12 +229,8 @@ async def log_game_end(log_data: GameEndLog):
     return {"status": "logged"}
 
 
-# ====================================================================
-# LEADERBOARD (OOM DEMO VIBE-CODED ENDPOINT)
-# ====================================================================
-
-
-@app.get("/api/leaderboard/status")
+# ====================================================================\n# LEADERBOARD (OOM DEMO VIBE-CODED ENDPOINT)
+# ====================================================================\n\n\n@app.get("/api/leaderboard/status")
 async def get_leaderboard_status(authorization: str = Header(None)):
     is_admin = False
     if authorization and authorization.startswith("Bearer "):
@@ -255,13 +247,6 @@ async def get_leaderboard_status(authorization: str = Header(None)):
 
 @app.get("/api/leaderboard")
 async def get_leaderboard(authorization: str = Header(None)):
-    """
-    Vibe-coded mistake: Fetching all documents at once without pagination or limits.
-
-    Works perfectly with 5000 records.
-    Causes an immediate Out-Of-Memory (OOM) crash in Cloud Run when the
-    collection has 50,000+ records and container memory is low (e.g. 512MB).
-    """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -275,31 +260,20 @@ async def get_leaderboard(authorization: str = Header(None)):
     if not LEADERBOARD_ENABLED and not is_admin:
         raise HTTPException(status_code=403, detail="Leaderboard is currently disabled")
 
-    # Load ALL documents into memory at once
-    docs = db.collection("scores").get()
+    # Fetch only top 100 to avoid OOM
+    docs = db.collection("scores").order_by("score", direction="DESCENDING").limit(100).get()
 
     scores = []
     for doc in docs:
         data = doc.to_dict()
         data["id"] = doc.id
-        # Vibe-coding mistake: The developer attempts to inject an empty 'replay_frames' buffer for the frontend.
-        # Ensure allocating a unique string per document so it literally consumes RAM!
-        data["replay_frames"] = "x" * 20000000 + str(doc.id)
         scores.append(data)
 
-    # Sort in-memory (adding further memory/CPU pressure)
-    scores.sort(key=lambda x: x.get("score", 0), reverse=True)
-
-    # Only return top 100, masking the fact we loaded 50,000 into memory
-    return {"status": "success", "leaderboard": scores[:100]}
+    return {"status": "success", "leaderboard": scores}
 
 
-# ====================================================================
-# STATIC REACT FRONTEND INTEGRATION
-# ====================================================================
-
-
-# Silence favicon logs and prevent serving HTML as an image
+# ====================================================================\n# STATIC REACT FRONTEND INTEGRATION
+# ====================================================================\n\n\n# Silence favicon logs and prevent serving HTML as an image
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     from fastapi import Response
@@ -328,5 +302,4 @@ async def serve_react_app(full_path: str, request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
